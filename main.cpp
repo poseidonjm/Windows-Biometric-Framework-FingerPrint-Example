@@ -4,8 +4,9 @@
  */
 
 #include "headers.h"
+#include<conio.h> //required for _getch()
 
-void BmpSetImageData(SBmpImage *bmp, const std::vector<uint8> &data, uint32 width, uint32 height)
+void BmpSetImageData(SBmpImage *bmp, const std::vector<uint8> &data, uint32 width, uint32 height, uint32 horzRes, uint32 vertRes)
 {
   bmp->data.resize(data.size());
 
@@ -39,8 +40,10 @@ void BmpSetImageData(SBmpImage *bmp, const std::vector<uint8> &data, uint32 widt
   bmp->infoHeader.bitsPerPixel = NBmp::BMP_INFO_HEADER_BITS_PER_PIXEL_24;
   bmp->infoHeader.compression = NBmp::BMP_INFO_HEADER_COMPRESSION;
   bmp->infoHeader.imageSize = (width * NBmp::BMP_24B_COLORS + bmp->dataPaddingSize) * height;
-  bmp->infoHeader.pixelPerMeterX = NBmp::BMP_INFO_HEADER_PIXEL_PER_METER_X;
-  bmp->infoHeader.pixelPerMeterY = NBmp::BMP_INFO_HEADER_PIXEL_PER_METER_Y;
+  //bmp->infoHeader.pixelPerMeterX = NBmp::BMP_INFO_HEADER_PIXEL_PER_METER_X;
+  //bmp->infoHeader.pixelPerMeterY = NBmp::BMP_INFO_HEADER_PIXEL_PER_METER_Y;
+  bmp->infoHeader.pixelPerMeterX = (int)(10000 * horzRes / 254);	// conversion inch<->meter
+  bmp->infoHeader.pixelPerMeterY = (int)(10000 * vertRes / 254);
   bmp->infoHeader.colors = NBmp::BMP_INFO_HEADER_COLORS;
   bmp->infoHeader.usedColors = NBmp::BMP_INFO_HEADER_USED_COLORS;
 }
@@ -107,9 +110,10 @@ HRESULT CaptureSample()
   hr = WinBioOpenSession(
     WINBIO_TYPE_FINGERPRINT,    // Service provider
     WINBIO_POOL_SYSTEM,         // Pool type
-    WINBIO_FLAG_RAW,            // Access: Capture raw data
-    NULL,                       // Array of biometric unit IDs
-    0,                          // Count of biometric unit IDs
+	WINBIO_FLAG_RAW,            // Access: Capture raw data //To call WinBioCaptureSample function successfully, you must open the session handle by specifying WINBIO_FLAG_RAW
+								//WINBIO_FLAG_RAW: The client application captures raw biometric data using WinBioCaptureSample.
+    NULL,                       // Array of biometric unit IDs //NULL if the PoolType parameter is WINBIO_POOL_SYSTEM
+    0,                          // Count of biometric unit IDs//zero if the PoolType parameter is WINBIO_POOL_SYSTEM.
     WINBIO_DB_DEFAULT,          // Default database
     &sessionHandle              // [out] Session handle
     );
@@ -136,10 +140,10 @@ HRESULT CaptureSample()
   // Capture a biometric sample.
   std::cout << "Calling WinBioCaptureSample - Swipe sensor...\n";
 
-  hr = WinBioCaptureSample(
+   hr = WinBioCaptureSample(
     sessionHandle,
     WINBIO_NO_PURPOSE_AVAILABLE,
-    WINBIO_DATA_FLAG_RAW,
+	WINBIO_DATA_FLAG_RAW,//WINBIO_DATA_FLAG_RAW
     &unitId,
     &sample,
     &sampleSize,
@@ -181,6 +185,8 @@ HRESULT CaptureSample()
     DWORD height = AnsiBdbRecord->VerticalLineLength; // Height of image in pixels
 
     std::cout << "Image resolution: " << width << " x " << height << "\n";
+    std::cout << "Horizontal resolution: " << AnsiBdbHeader->HorizontalImageResolution << " Vertical resolution: " << AnsiBdbHeader->VerticalImageResolution << "\n";
+    std::cout << "ansi_381_record.BlockLength: " << AnsiBdbRecord->BlockLength << "\n";
 
     PBYTE firstPixel = (PBYTE)((PBYTE)AnsiBdbRecord) + sizeof(WINBIO_BDB_ANSI_381_RECORD);
 
@@ -194,13 +200,24 @@ HRESULT CaptureSample()
     s << st.wYear << "." << st.wMonth << "." << st.wDay << "." << st.wHour << "." << st.wMinute << "." << st.wSecond << "." << st.wMilliseconds;
     std::string bmpFile = "data/fingerPrint_"+s.str()+".bmp";
 
-    BmpSetImageData(&bmp, data, width, height);
+    BmpSetImageData(&bmp, data, width, height, AnsiBdbHeader->HorizontalImageResolution, AnsiBdbHeader->VerticalImageResolution);
     BmpSave(&bmp, bmpFile);
     //ShellExecuteA(NULL, NULL, bmpFile.c_str(), NULL, NULL, SW_SHOWNORMAL);
 
-    CFile raw("rawData.bin");
+    CFile raw("data/rawData_" + s.str() + ".bin");
     raw.write(&data[0], data.size());
     raw.close();
+
+
+    PBYTE vendor_firstByte = (PBYTE)((PBYTE)sample) + sample->VendorDataBlock.Offset;
+    int vendor_size = sample->VendorDataBlock.Size;
+
+    std::vector<uint8> pkc(vendor_size);
+    memcpy(&pkc[0], vendor_firstByte, vendor_size);
+
+    CFile raw_pck("data/template_" + s.str() + ".pkc");
+    raw_pck.write(&pkc[0], pkc.size());
+    raw_pck.close();
 
     WinBioFree(sample);
     sample = NULL;
@@ -215,8 +232,74 @@ HRESULT CaptureSample()
   return hr;
 }
 
+HRESULT EnumerateSensors()
+{
+    // Declare variables.
+    HRESULT hr = S_OK;
+    PWINBIO_UNIT_SCHEMA unitSchema = NULL;
+    SIZE_T unitCount = 0;
+    SIZE_T index = 0;
+
+    // Enumerate the installed biometric units.
+    hr = WinBioEnumBiometricUnits(
+        WINBIO_TYPE_FINGERPRINT,        // Type of biometric unit
+        &unitSchema,                    // Array of unit schemas
+        &unitCount);                   // Count of unit schemas
+
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioEnumBiometricUnits failed. hr = 0x%x\n", hr);
+        goto e_Exit;
+    }
+
+    // Display information for each installed biometric unit.
+    wprintf_s(L"\nSensors: \n");
+    for (index = 0; index < unitCount; ++index)
+    {
+        wprintf_s(L"\n[%d]: \tUnit ID: %d\n",
+            index,
+            unitSchema[index].UnitId);
+        wprintf_s(L"\tDevice instance ID: %s\n",
+            unitSchema[index].DeviceInstanceId);
+        wprintf_s(L"\tPool type: %d\n",
+            unitSchema[index].PoolType);
+        wprintf_s(L"\tBiometric factor: %d\n",
+            unitSchema[index].BiometricFactor);
+        wprintf_s(L"\tSensor subtype: %d\n",
+            unitSchema[index].SensorSubType);
+        wprintf_s(L"\tSensor capabilities: 0x%08x\n",
+            unitSchema[index].Capabilities);
+        wprintf_s(L"\tDescription: %s\n",
+            unitSchema[index].Description);
+        wprintf_s(L"\tManufacturer: %s\n",
+            unitSchema[index].Manufacturer);
+        wprintf_s(L"\tModel: %s\n",
+            unitSchema[index].Model);
+        wprintf_s(L"\tSerial no: %s\n",
+            unitSchema[index].SerialNumber);
+        wprintf_s(L"\tFirmware version: [%d.%d]\n",
+            unitSchema[index].FirmwareVersion.MajorVersion,
+            unitSchema[index].FirmwareVersion.MinorVersion);
+    }
+
+
+e_Exit:
+    if (unitSchema != NULL)
+    {
+        WinBioFree(unitSchema);
+        unitSchema = NULL;
+    }
+
+    wprintf_s(L"\nPress any key to exit...");
+    _getch();
+
+    return hr;
+}
+
 int main()
 {
+    EnumerateSensors();
   CreateDirectoryA("data", NULL);
-  while(!FAILED(CaptureSample()));
+  CaptureSample();
+  //while(!FAILED(CaptureSample()));
 }
