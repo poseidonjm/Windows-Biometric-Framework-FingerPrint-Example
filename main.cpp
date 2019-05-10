@@ -296,10 +296,318 @@ e_Exit:
     return hr;
 }
 
+HRESULT EnrollSysPool(
+    BOOL discardEnrollment,
+    WINBIO_BIOMETRIC_SUBTYPE subFactor)
+{
+    HRESULT hr = S_OK;
+    WINBIO_IDENTITY identity = { 0 };
+    WINBIO_SESSION_HANDLE sessionHandle = NULL;
+    WINBIO_UNIT_ID unitId = 0;
+    WINBIO_REJECT_DETAIL rejectDetail = 0;
+    BOOLEAN isNewTemplate = TRUE;
+
+    // Connect to the system pool. 
+    hr = WinBioOpenSession(
+        WINBIO_TYPE_FINGERPRINT,    // Service provider
+        WINBIO_POOL_SYSTEM,         // Pool type
+        WINBIO_FLAG_DEFAULT,        // Configuration and access
+        NULL,                       // Array of biometric unit IDs
+        0,                          // Count of biometric unit IDs
+        WINBIO_DB_DEFAULT,          // Database ID
+        &sessionHandle              // [out] Session handle
+    );
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioOpenSession failed. ");
+        wprintf_s(L"hr = 0x%x\n", hr);
+        //DWORD code = GetLastError();
+        //HRESULT _hr = HRESULT_FROM_WIN32(code);
+        goto e_Exit;
+    }
+
+    // Locate a sensor.
+    wprintf_s(L"\n Swipe your finger on the sensor...\n");
+    hr = WinBioLocateSensor(sessionHandle, &unitId);
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioLocateSensor failed. hr = 0x%x\n", hr);
+        //DWORD code = GetLastError();
+        //HRESULT _hr = HRESULT_FROM_WIN32(code);
+        goto e_Exit;
+    }
+
+    // Begin the enrollment sequence. 
+    wprintf_s(L"\n Starting enrollment sequence...\n");
+    hr = WinBioEnrollBegin(
+        sessionHandle,      // Handle to open biometric session
+        subFactor,          // Finger to create template for
+        unitId              // Biometric unit ID
+    );
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioEnrollBegin failed. hr = 0x%x\n", hr);
+        //DWORD code = GetLastError();
+        //HRESULT _hr = HRESULT_FROM_WIN32(code);
+        goto e_Exit;
+    }
+
+    // Capture enrollment information by swiping the sensor with
+    // the finger identified by the subFactor argument in the 
+    // WinBioEnrollBegin function.
+    for (int swipeCount = 1;; ++swipeCount)
+    {
+        wprintf_s(L"\n Swipe the sensor to capture %s sample.",
+            (swipeCount == 1) ? L"the first" : L"another");
+        
+        //Attaching a debugger will cause a loop on device StartCapture
+        hr = WinBioEnrollCapture(
+            sessionHandle,  // Handle to open biometric session
+            &rejectDetail   // [out] Failure information
+        );
+
+        wprintf_s(L"\n Sample %d captured from unit number %d.",
+            swipeCount,
+            unitId);
+
+        if (hr == WINBIO_I_MORE_DATA)
+        {
+            wprintf_s(L"\n    More data required.\n");
+            continue;
+        }
+        if (FAILED(hr))
+        {
+            if (hr == WINBIO_E_BAD_CAPTURE)
+            {
+                wprintf_s(L"\n  Error: Bad capture; reason: %d",
+                    rejectDetail);
+                continue;
+            }
+            else
+            {
+                wprintf_s(L"\n WinBioEnrollCapture failed. hr = 0x%x", hr);
+                //DWORD code = GetLastError();
+                //HRESULT _hr = HRESULT_FROM_WIN32(code);
+                goto e_Exit;
+            }
+        }
+        else
+        {
+            wprintf_s(L"\n    Template completed.\n");
+            break;
+        }
+    }
+
+    // Discard the enrollment if the appropriate flag is set.
+    // Commit the enrollment if it is not discarded.
+    if (discardEnrollment == TRUE)
+    {
+        wprintf_s(L"\n Discarding enrollment...\n\n");
+        hr = WinBioEnrollDiscard(sessionHandle);
+        if (FAILED(hr))
+        {
+            wprintf_s(L"\n WinBioLocateSensor failed. hr = 0x%x\n", hr);
+            //DWORD code = GetLastError();
+            //HRESULT _hr = HRESULT_FROM_WIN32(code);
+        }
+        goto e_Exit;
+    }
+    else
+    {
+        wprintf_s(L"\n Committing enrollment...\n");
+        hr = WinBioEnrollCommit(
+            sessionHandle,      // Handle to open biometric session
+            &identity,          // WINBIO_IDENTITY object for the user
+            &isNewTemplate);    // Is this a new template
+
+        if (FAILED(hr))
+        {
+            wprintf_s(L"\n WinBioEnrollCommit failed. hr = 0x%x\n", hr);
+            //DWORD code = GetLastError();
+            //HRESULT _hr = HRESULT_FROM_WIN32(code);
+            goto e_Exit;
+        }
+    }
+
+
+e_Exit:
+    if (sessionHandle != NULL)
+    {
+        WinBioCloseSession(sessionHandle);
+        sessionHandle = NULL;
+    }
+
+    wprintf_s(L" Press any key to continue...");
+    _getch();
+
+    return hr;
+}
+
+
+//------------------------------------------------------------------------
+// The following function retrieves the identity of the current user.
+// This is a helper function and is not part of the Windows Biometric
+// Framework API.
+//
+HRESULT GetCurrentUserIdentity(__inout PWINBIO_IDENTITY Identity)
+{
+    // Declare variables.
+    HRESULT hr = S_OK;
+    HANDLE tokenHandle = NULL;
+    DWORD bytesReturned = 0;
+    struct {
+        TOKEN_USER tokenUser;
+        BYTE buffer[SECURITY_MAX_SID_SIZE];
+    } tokenInfoBuffer;
+
+    // Zero the input identity and specify the type.
+    ZeroMemory(Identity, sizeof(WINBIO_IDENTITY));
+    Identity->Type = WINBIO_ID_TYPE_NULL;
+
+    // Open the access token associated with the
+    // current process
+    if (!OpenProcessToken(
+        GetCurrentProcess(),            // Process handle
+        TOKEN_READ,                     // Read access only
+        &tokenHandle))                  // Access token handle
+    {
+        DWORD win32Status = GetLastError();
+        wprintf_s(L"Cannot open token handle: %d\n", win32Status);
+        hr = HRESULT_FROM_WIN32(win32Status);
+        goto e_Exit;
+    }
+
+    // Zero the tokenInfoBuffer structure.
+    ZeroMemory(&tokenInfoBuffer, sizeof(tokenInfoBuffer));
+
+    // Retrieve information about the access token. In this case,
+    // retrieve a SID.
+    if (!GetTokenInformation(
+        tokenHandle,                    // Access token handle
+        TokenUser,                      // User for the token
+        &tokenInfoBuffer.tokenUser,     // Buffer to fill
+        sizeof(tokenInfoBuffer),        // Size of the buffer
+        &bytesReturned))                // Size needed
+    {
+        DWORD win32Status = GetLastError();
+        wprintf_s(L"Cannot query token information: %d\n", win32Status);
+        hr = HRESULT_FROM_WIN32(win32Status);
+        goto e_Exit;
+    }
+
+    // Copy the SID from the tokenInfoBuffer structure to the
+    // WINBIO_IDENTITY structure. 
+    CopySid(
+        SECURITY_MAX_SID_SIZE,
+        Identity->Value.AccountSid.Data,
+        tokenInfoBuffer.tokenUser.User.Sid
+    );
+
+    // Specify the size of the SID and assign WINBIO_ID_TYPE_SID
+    // to the type member of the WINBIO_IDENTITY structure.
+    Identity->Value.AccountSid.Size = GetLengthSid(tokenInfoBuffer.tokenUser.User.Sid);
+    Identity->Type = WINBIO_ID_TYPE_SID;
+
+e_Exit:
+
+    if (tokenHandle != NULL)
+    {
+        CloseHandle(tokenHandle);
+    }
+
+    return hr;
+}
+
+HRESULT DeleteTemplate(WINBIO_BIOMETRIC_SUBTYPE subFactor)
+{
+    HRESULT hr = S_OK;
+    WINBIO_IDENTITY identity = { 0 };
+    WINBIO_SESSION_HANDLE sessionHandle = NULL;
+    WINBIO_UNIT_ID unitId = 0;
+
+    // Find the identity of the user.
+    hr = GetCurrentUserIdentity(&identity);
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n User identity not found. hr = 0x%x\n", hr);
+        goto e_Exit;
+    }
+
+    // Connect to the system pool. 
+    //
+    hr = WinBioOpenSession(
+        WINBIO_TYPE_FINGERPRINT,    // Service provider
+        WINBIO_POOL_SYSTEM,         // Pool type
+        WINBIO_FLAG_DEFAULT,        // Configuration and access
+        NULL,                       // Array of biometric unit IDs
+        0,                          // Count of biometric unit IDs
+        NULL,                       // Database ID
+        &sessionHandle              // [out] Session handle
+    );
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioEnumBiometricUnits failed. hr = 0x%x\n", hr);
+        goto e_Exit;
+    }
+
+    // Locate the sensor.
+    //
+    wprintf_s(L"\n Swipe your finger on the sensor...\n");
+    hr = WinBioLocateSensor(sessionHandle, &unitId);
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioLocateSensor failed. hr = 0x%x\n", hr);
+        goto e_Exit;
+    }
+
+    // Delete the template identified by the subFactor argument.
+    //
+    hr = WinBioDeleteTemplate(
+        sessionHandle,
+        unitId,
+        &identity,
+        subFactor
+    );
+    if (FAILED(hr))
+    {
+        wprintf_s(L"\n WinBioDeleteTemplate failed. hr = 0x%x\n", hr);
+        goto e_Exit;
+    }
+
+e_Exit:
+    if (sessionHandle != NULL)
+    {
+        WinBioCloseSession(sessionHandle);
+        sessionHandle = NULL;
+    }
+
+    wprintf_s(L"Press any key to exit...");
+    _getch();
+
+    return hr;
+}
+
 int main()
 {
     EnumerateSensors();
-  CreateDirectoryA("data", NULL);
-  CaptureSample();
+  //CreateDirectoryA("data", NULL);
+  //CaptureSample();
   //while(!FAILED(CaptureSample()));
+    /*
+WINBIO_ANSI_381_POS_RH_THUMB
+WINBIO_ANSI_381_POS_RH_INDEX_FINGER
+WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER
+WINBIO_ANSI_381_POS_RH_RING_FINGER
+WINBIO_ANSI_381_POS_RH_LITTLE_FINGER
+WINBIO_ANSI_381_POS_LH_THUMB
+WINBIO_ANSI_381_POS_LH_INDEX_FINGER
+WINBIO_ANSI_381_POS_LH_MIDDLE_FINGER
+WINBIO_ANSI_381_POS_LH_RING_FINGER
+WINBIO_ANSI_381_POS_LH_LITTLE_FINGER
+
+WINBIO_ANSI_381_POS_RH_FOUR_FINGERS
+WINBIO_ANSI_381_POS_LH_FOUR_FINGERS
+    */
+    //EnrollSysPool(FALSE, WINBIO_ANSI_381_POS_LH_THUMB);//WINBIO_SUBTYPE_NO_INFORMATION(fail)
+  DeleteTemplate(WINBIO_ANSI_381_POS_RH_THUMB);
 }
